@@ -1,5 +1,33 @@
 #!/usr/bin/env  bash
 
+# set -xeuo pipefail
+declare -A default_dirs=(
+  [cpp]="cpp"
+  [pdf]="books"
+  [txt]="notes"
+)
+
+declare -A user_dirs
+
+declare -a found_extensions
+
+load_config() {
+  local CONFIG_FILE="$HOME/.config/sorter/sorter.conf"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "No config found, writing template" >&2
+    mkdir .config/sorter
+    touch "$CONFIG_FILE"
+    printf "# Custom directory mappings for filetypes\n# Format: EXTENSION=DIRECTORYNAME\ncpp=cpp\npdf=books\ntxt=notes\nmp3=music\n" >"$CONFIG_FILE"
+    return 1
+  fi
+
+  while IFS='=' read -r ext dir; do
+    if [[ -n "$ext" && ! "$ext" =~ ^# ]]; then
+      user_dirs["$ext"]="${dir//[^[:alnum:]_-]/}"
+    fi
+  done <"$CONFIG_FILE"
+}
+
 while getopts 'mp:' OPTION; do
   case $OPTION in
   p)
@@ -7,7 +35,7 @@ while getopts 'mp:' OPTION; do
       cd "$OPTARG"
       echo "Changed directory to $OPTARG"
     else
-      echo "Invalid directory: $OPTARG"
+      echo "Invalid directory: $OPTARG" >&2
       exit 1
     fi
     ;;
@@ -17,77 +45,66 @@ while getopts 'mp:' OPTION; do
   esac
 done
 
-mapfile -t ext < <(
-  for file in *; do
-    if [[ "$file" =~ \. ]]; then
-      printf "%s\n" "${file##*.}"
+find_extensions() {
+  shopt -s nullglob
+  for file in *.*; do
+    local ext="${file##*.}"
+    if [[ -n "$ext" && ! " ${found_extensions[@]} " =~ " $ext " ]]; then
+      found_extensions+=("$ext")
     fi
-  done | sort -u
-)
+  done
+  shopt -u nullglob
 
-if [[ -z "$ext" ]]; then
-  echo "Nothing to do."
-  exit 1
-fi
+  if [[ ${#found_extensions[@]} -eq 0 ]]; then
+    echo "No files with extensions found." >&2
+    return 1
+  fi
+}
 
-getdir() {
-  for i in "${!ext[@]}"; do
-    echo "Directory name for ${ext[i]}"
-    read -r dirname[i]
-    dirname[i]=$(echo "${dirname[i]}" | tr -d '[:space:]' | tr -cd '[:alnum:]_+-')
-    if [[ -z "${dirname[i]}" ]]; then
-      echo "Invalid directory name. Please try again."
-      exit 1
+get_target_dir() {
+  local ext="$1"
+
+  if [[ -v "user_dirs[$ext]" ]]; then
+    echo "${user_dirs[$ext]}"
+    return
+  fi
+
+  if [[ -v default_dirs[$ext] ]]; then
+    echo "${default_dirs[$ext]}"
+    return
+  fi
+
+  while true; do
+    read -rp "Enter directory name for .$ext files? (default: ${ext}_files):" dir
+    dir=$(tr -d '[:space:]' <<<"$dir" | tr -cd '[:alnum:]_-')
+
+    if [[ -z "$dir" ]]; then
+      dir="${ext}_files"
+    fi
+
+    if [[ "$dir" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      echo "$dir"
+
+      user_dirs["$ext"]="$dir"
+      return
+    else
+      echo "Invalid directory name. Use only letters, numbers, underscores, and hyphens."
     fi
   done
 }
 
-if ((manual_mode)); then
-  getdir
-  for i in "${!ext[@]}"; do
-    origin=".${ext[i]}"
-    target="${dirname[i]}"
+main() {
+  load_config || echo "Edit the configuration file at $HOME/.config/sorter/sorter.conf then run again"
+  find_extensions
 
-    if [[ -z $(find . -type d -name "$target" 2>/dev/null) ]]; then
+  for ext in "${found_extensions[@]}"; do
+    target=$(get_target_dir "$ext")
+    if [[ ! -d "$target" ]]; then
       mkdir -p "$target"
-      echo "Directory '$target' created."
+      echo "Created directory: $target"
     fi
-
-    mv *"$origin" "$target"
-    echo "$origin moved to $target"
+    mv -- *."$ext" "$target/" 2>/dev/null && echo "Moved .$ext to $target/"
   done
-else
-  for i in "${!ext[@]}"; do
-    origin="${ext[i]}"
+}
 
-    case $origin in
-    cpp)
-      target="cpp"
-      if [[ -z $(find . -type d -name "$target" 2>/dev/null) ]]; then
-        mkdir -p "$target"
-        echo "Directory '$target' created."
-      fi
-      mv *".$origin" "$target"
-      echo ".$origin moved to $target"
-      ;;
-    pdf)
-      target="books"
-      if [[ -z $(find . -type d -name "$target" 2>/dev/null) ]]; then
-        mkdir -p "$target"
-        echo "Directory '$target' created."
-      fi
-      mv *".$origin" "$target"
-      echo ".$origin moved to $target"
-      ;;
-    txt)
-      target="notes"
-      if [[ -z $(find . -type d -name "$target" 2>/dev/null) ]]; then
-        mkdir -p "$target"
-        echo "Directory '$target' created."
-      fi
-      mv *".$origin" "$target"
-      echo ".$origin moved to $target"
-      ;;
-    esac
-  done
-fi
+main "$@"
